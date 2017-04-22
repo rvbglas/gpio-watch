@@ -25,17 +25,16 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#include <syslog.h>
 
 #include "gpio.h"
 #include "fileutil.h"
-#include "logging.h"
 
 #define OPTSTRING "s:e:vDdl:"
 
 #define OPT_SCRIPT_DIR		's'
 #define OPT_DEFAULT_EDGE	'e'
 #define OPT_VERBOSE		'v'
-#define OPT_LOGFILE		'l'
 #define OPT_DETACH		'd'
 
 // Where to look for event scripts.  Scripts in this directory
@@ -54,6 +53,8 @@ char *logfile = NULL;
 int default_edge = EDGE_BOTH;
 int detach       = 0;
 
+int loglevel = LOG_INFO;
+
 // This will hold the list of pins to monitor generated from
 // command line arguments.
 struct pin *pins = NULL;
@@ -64,10 +65,11 @@ void usage (FILE *out) {
 }
 
 // Run a script in response to an event.
-void run_script (int pin, int value) {
+void run_script (int pin, int value, int switch_interval) {
 	char *script_path,
 	     pin_str[GPIODIRLEN],
-	     value_str[2];
+	     value_str[2],
+	     interval_str[10];
 	int script_path_len;
 	pid_t pid;
 	int status;
@@ -81,19 +83,20 @@ void run_script (int pin, int value) {
 			"%s/%d", script_dir, pin);
 
 	if (! is_file(script_path)) {
-		LOG_WARN("pin %d: script \"%s\" does not exist",
+		syslog(LOG_WARNING,"pin %d: script \"%s\" does not exist",
 				pin, script_path);
 		return;
 	}
 
 	snprintf(pin_str, GPIODIRLEN, "%d", pin);
 	sprintf(value_str, "%d", value);
+	sprintf(interval_str, "%d", switch_interval);
 
-	LOG_INFO("pin %d: running script %s", pin, script_path);
+	syslog(LOG_INFO,"pin %d state %d interval %d: running script %s", pin, value, switch_interval, script_path);
 
 	if (0 == (pid = fork())) {
 		int res;
-		res = execl(script_path, script_path, pin_str, value_str, (char *)NULL);
+		res = execl(script_path, script_path, pin_str, value_str, interval_str, (char *)NULL);
 		if (-1 == res) exit(255);
 	}
 
@@ -101,11 +104,11 @@ void run_script (int pin, int value) {
 
 	if (WIFEXITED(status)) {
 		if (0 != WEXITSTATUS(status)) {
-			LOG_WARN("pin %d: event script exited with status = %d",
+			syslog(LOG_WARNING,"pin %d: event script exited with status = %d",
 					pin, WEXITSTATUS(status));
 		}
 	} else if (WIFSIGNALED(status)) {
-		LOG_WARN("pin %d: event script exited due to signal %d",
+		syslog(LOG_WARNING,"pin %d: event script exited due to signal %d",
 				pin, WTERMSIG(status));
 	}
 
@@ -121,10 +124,12 @@ int watch_pins() {
 	int pin_path_len;
 	char valbuf[3];
 	struct timespec ts;
+	int switch_interval;
 
 	unsigned char switch_state[num_pins];
 	long long now,
-	     down_at[num_pins];
+	     down_at[num_pins],
+	     up_at[num_pins];
 
 	valbuf[2] = '\0';
 	memset(switch_state, 0, num_pins);
@@ -136,6 +141,8 @@ int watch_pins() {
 	for (i=0; i<num_pins; i++) {
 		int fd;
 
+		up_at[i]=down_at[i]=now;
+
 		snprintf(pin_path, pin_path_len,
 				"%s/gpio%d/value", GPIO_BASE, pins[i].pin);
 		fd = open(pin_path, O_RDONLY);
@@ -144,7 +151,7 @@ int watch_pins() {
 		fdlist[i].events = POLLPRI;
 	}
 
-	LOG_INFO("starting to monitor for gpio events");
+	syslog(LOG_INFO,"starting to monitor for gpio events");
 
 	while (1) {
 		int err;
@@ -157,7 +164,7 @@ int watch_pins() {
 
 		for (i=0; i<num_pins; i++) {
 			if (fdlist[i].revents & POLLPRI) {
-				LOG_DEBUG("pin %d: received event",
+				syslog(LOG_DEBUG,"pin %d: received event",
 						pins[i].pin);
 				lseek(fdlist[i].fd, 0, SEEK_SET);
 				read(fdlist[i].fd, valbuf, 2);
@@ -170,21 +177,27 @@ int watch_pins() {
 					now = ts.tv_sec * NANOS + ts.tv_nsec;
 
 					if (switch_state[i] == 0 && valbuf[0] == '1') {
-						down_at[i] = now;
+						switch_interval = now - up_at[i];
 						switch_state[i] = 1;
+						down_at[i] = now;
 					} else if (switch_state[i] == 1 && valbuf[0] == '0') {
 						if (now - down_at[i] > DEBOUNCE_INTERVAL) {
+							switch_interval = now - down_at[i];
 							switch_state[i] = 0;
+							up_at[i] = now;
 							goto run_script;
 						}
 					}
 
 					continue;
+  				} else {
+  					switch_interval = 0;
   				}
 
 run_script:
 				run_script(pins[i].pin,
-						valbuf[0] == '1' ? 1 : 0);
+						valbuf[0] == '1' ? 1 : 0,
+						switch_interval/(1000*1000));
 			}
 		}
 	}
@@ -198,9 +211,6 @@ int main(int argc, char **argv) {
 
 	while (-1 != (ch = getopt(argc, argv, OPTSTRING))) {
 		switch (ch) {
-			case OPT_LOGFILE:
-				logfile = strdup(optarg);
-				break;
 			case OPT_DETACH:
 				detach = 1;
 				break;
@@ -226,7 +236,7 @@ int main(int argc, char **argv) {
 	if (logfile) {
 		int fd;
 		if (-1 == (fd = open(logfile, O_WRONLY|O_CREAT|O_APPEND, 0644))) {
-			LOG_ERROR("failed to open logfile %s", logfile);
+			syslog(LOG_ERR,"failed to open logfile %s", logfile);
 			exit(1);
 		}
 
@@ -238,7 +248,7 @@ int main(int argc, char **argv) {
 	}
 
 	if (! is_dir(script_dir)) {
-		LOG_ERROR("error: script directory \"%s\" does not exist.",
+		syslog(LOG_ERR,"error: script directory \"%s\" does not exist.",
 				script_dir);
 		exit(1);
 	}

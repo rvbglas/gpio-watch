@@ -23,7 +23,6 @@
 
 #include "gpio.h"
 #include "fileutil.h"
-#include "logging.h"
 
 // Parse a string ("in", "out") and return
 // the corresponding DIRECTION_* constant, or -1 if the string
@@ -62,8 +61,6 @@ void pin_export(int pin) {
 	int export_path_len,
 	    pin_path_len;
 
-	LOG_DEBUG("pin %d: exporting", pin);
-
 	export_path_len = strlen(GPIO_BASE) + strlen("export") + 3;
 	export_path = (char *)malloc(export_path_len);
 	snprintf(export_path, export_path_len-1, "%s/export", GPIO_BASE);
@@ -77,17 +74,12 @@ void pin_export(int pin) {
 		int tries = 0;
 
 		fp = fopen(export_path, "w");
-		if (!fp) {
-			LOG_ERROR("pin %d: failed to open %s: cannot export",
-				pin, export_path);
-		}
 		fprintf(fp, "%d\n", pin);
 		fclose(fp);
 
 		// gpio directories are initially owned by 'root'.  If you have
 		// udev rules that change this, it may take a moment for those 
 		// changes to happen.
-		LOG_DEBUG("waiting for udev to catch up");
 		sleep(1);
 	}
 
@@ -102,15 +94,12 @@ int pin_set_edge(int pin, int edge) {
 	int pin_path_len;
 	FILE *fp;
 
-	LOG_DEBUG("pin %d: setting edge mode %d", pin, edge);
-
 	pin_path_len = strlen(GPIO_BASE) + GPIODIRLEN + strlen("edge") + 4;
 	pin_path = (char *)malloc(pin_path_len);
 	snprintf(pin_path, pin_path_len - 1,
 			"%s/gpio%d", GPIO_BASE, pin);
 
 	if (! is_dir(pin_path)) {
-		LOG_ERROR("pin %d: not exported.", pin);
 		exit(1);
 	}
 
@@ -119,8 +108,6 @@ int pin_set_edge(int pin, int edge) {
 
 	fp = fopen(pin_path, "w");
 	if (! fp) {
-		LOG_ERROR("pin %d: failed to open %s: unable to set edge",
-			pin, pin_path);
 		exit(1);
 	}
 
@@ -131,8 +118,6 @@ int pin_set_edge(int pin, int edge) {
 	else if (EDGE_BOTH == edge || EDGE_SWITCH == edge)
 		fprintf(fp, "both\n");
 	else {
-		LOG_ERROR("pin %d: invalid edge mode (%d)",
-				pin, edge);
 		exit(1);
 	}
 
@@ -146,15 +131,12 @@ int pin_set_direction(int pin, int direction) {
 	int pin_path_len;
 	FILE *fp;
 
-	LOG_DEBUG("pin %d: setting direction %d", pin, direction);
-
 	pin_path_len = strlen(GPIO_BASE) + GPIODIRLEN + strlen("direction") + 3;
 	pin_path = (char *)malloc(pin_path_len);
 	snprintf(pin_path, pin_path_len,
 			"%s/gpio%d", GPIO_BASE, pin);
 
 	if (! is_dir(pin_path)) {
-		LOG_ERROR("pin %d: not exported.", pin);
 		exit(1);
 	}
 
@@ -167,8 +149,6 @@ int pin_set_direction(int pin, int direction) {
 	else if (DIRECTION_OUT == direction)
 		fprintf(fp, "out\n");
 	else {
-		LOG_ERROR("pin %d: invalid direction (%d)",
-				pin, direction);
 		exit(1);
 	}
 
